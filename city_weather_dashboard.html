@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>City Weather Dashboard</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 760px; margin: 30px auto; padding: 0 16px; background: #f4f7fb; color: #1c2b3a; }
+  h1 { color: #1F4E79; }
+  .search { display: flex; gap: 8px; flex-wrap: wrap; }
+  input { flex: 1; min-width: 200px; padding: 10px; font-size: 16px; border: 1px solid #b8c7d9; border-radius: 6px; }
+  button { background: #2E75B6; color: #fff; border: 0; padding: 10px 20px; border-radius: 6px; font-size: 16px; cursor: pointer; }
+  button:hover { background: #1F4E79; }
+  .card { background: #fff; border: 1px solid #d0dff0; border-radius: 10px; padding: 18px; margin-top: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .day { text-align: center; background: #f7f9fc; border-radius: 8px; padding: 12px; }
+  .big { font-size: 42px; font-weight: bold; margin: 0; }
+  .muted { color: #4a5d70; }
+  .error { color: #a12622; }
+</style>
+</head>
+<body>
+<h1>City Weather Dashboard</h1>
+<div class="search">
+  <input id="city" type="text" placeholder="Enter a city, e.g. Nairobi" aria-label="City">
+  <button id="go">Search</button>
+</div>
+<div id="output" class="muted" style="margin-top:16px">Enter a city and press Search.</div>
+
+<script>
+// LEARNING PROJECT ONLY: anyone who opens this page can see this key.
+const API_KEY = "ef5817b5e6ebe837fc3367b83735779f";
+
+const OWM = "https://api.openweathermap.org/data/2.5";
+const WB = "https://api.worldbank.org/v2/country";
+const out = document.getElementById("output");
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function flag(code) {
+  return code.toUpperCase().replace(/./g, ch => String.fromCodePoint(127397 + ch.charCodeAt(0)));
+}
+
+async function getWeather(path, city) {
+  const params = new URLSearchParams({ q: city, appid: API_KEY, units: "metric" });
+  const res = await fetch(`${OWM}/${path}?${params}`);
+  if (res.status === 401) throw new Error("API key is invalid or not active yet (a new key can take up to 2 hours).");
+  if (res.status === 404) throw new Error("City not found. Check the spelling.");
+  if (res.status === 429) throw new Error("Too many requests. Wait a minute and try again.");
+  if (!res.ok) throw new Error(`Weather request failed (${res.status}).`);
+  return res.json();
+}
+
+async function getCountry(code) {
+  try {
+    const [infoRes, popRes] = await Promise.all([
+      fetch(`${WB}/${code}?format=json`),
+      fetch(`${WB}/${code}/indicator/SP.POP.TOTL?format=json&mrv=1`)
+    ]);
+    if (!infoRes.ok || !popRes.ok) return null;
+    const info = (await infoRes.json())[1][0];
+    const pop = (await popRes.json())[1][0].value;
+    return {
+      name: info.name,
+      region: info.region.value,
+      capital: info.capitalCity || "N/A",
+      population: pop ? pop.toLocaleString() : "N/A"
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Groups the 3-hourly forecast into the next 3 days (in the city's local time)
+function threeDays(fc) {
+  const tz = fc.city.timezone;
+  const local = t => new Date((t + tz) * 1000);
+  const today = local(Date.now() / 1000).toISOString().slice(0, 10);
+  const days = {};
+  for (const item of fc.list) {
+    const d = local(item.dt);
+    const key = d.toISOString().slice(0, 10);
+    if (key === today) continue;
+    (days[key] = days[key] || []).push({ item, hour: d.getUTCHours() });
+  }
+  return Object.keys(days).sort().slice(0, 3).map(key => {
+    const rows = days[key];
+    const noon = rows.reduce((a, b) => Math.abs(b.hour - 12) < Math.abs(a.hour - 12) ? b : a).item;
+    return {
+      label: new Date(key + "T00:00:00Z").toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" }),
+      min: Math.round(Math.min(...rows.map(r => r.item.main.temp_min))),
+      max: Math.round(Math.max(...rows.map(r => r.item.main.temp_max))),
+      text: noon.weather[0].description,
+      icon: noon.weather[0].icon
+    };
+  });
+}
+
+async function search() {
+  const city = document.getElementById("city").value.trim();
+  if (!city) { out.textContent = "Please enter a city name."; return; }
+  if (API_KEY.startsWith("PASTE")) {
+    out.innerHTML = '<span class="error">Add your OpenWeatherMap key at the top of the script.</span>';
+    return;
+  }
+
+  out.textContent = "Loading...";
+
+  try {
+    const [now, fc] = await Promise.all([getWeather("weather", city), getWeather("forecast", city)]);
+    const code = now.sys && now.sys.country;
+    const country = code ? await getCountry(code) : null;
+    const w = now.weather[0];
+
+    const forecastHtml = threeDays(fc).map(d => `
+      <div class="day">
+        <strong>${esc(d.label)}</strong><br>
+        <img src="https://openweathermap.org/img/wn/${esc(d.icon)}.png" alt="${esc(d.text)}" width="50" height="50"><br>
+        ${d.max}° / ${d.min}°C<br>
+        <span class="muted" style="text-transform:capitalize">${esc(d.text)}</span>
+      </div>`).join("");
+
+    const countryHtml = country
+      ? `<h3>${flag(code)} ${esc(country.name)}</h3>
+         <p><strong>Capital:</strong> ${esc(country.capital)}</p>
+         <p><strong>Region:</strong> ${esc(country.region)}</p>
+         <p><strong>Population:</strong> ${esc(country.population)}</p>`
+      : "<p class='muted'>Country info is unavailable.</p>";
+
+    out.innerHTML = `
+      <div class="card">
+        <h2>${esc(now.name)}${code ? ", " + esc(code) : ""}</h2>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <img src="https://openweathermap.org/img/wn/${esc(w.icon)}@2x.png" alt="${esc(w.description)}" width="80" height="80">
+          <div><p class="big">${Math.round(now.main.temp)}°C</p><span style="text-transform:capitalize">${esc(w.description)}</span></div>
+        </div>
+        <p class="muted">Feels like ${Math.round(now.main.feels_like)}°C · Humidity ${now.main.humidity}% · Wind ${now.wind.speed} m/s</p>
+      </div>
+      <div class="card"><h3>3-day forecast</h3><div class="grid">${forecastHtml}</div></div>
+      <div class="card"><h3>Country info</h3>${countryHtml}</div>`;
+  } catch (e) {
+    out.innerHTML = `<span class="error">${esc(e.message)}</span>`;
+  }
+}
+
+document.getElementById("go").addEventListener("click", search);
+document.getElementById("city").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+</script>
+</body>
+</html>
